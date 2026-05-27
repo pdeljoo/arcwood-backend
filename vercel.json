@@ -1,4 +1,17 @@
 {
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/extract_cabinets.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/extract_cabinets",
+      "dest": "/api/extract_cabinets.py"
+    }
+  ],
   "functions": {
     "api/extract_cabinets.py": {
       "memory": 1024,
