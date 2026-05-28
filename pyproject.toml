@@ -1,0 +1,2 @@
+[tool.vercel]
+entrypoint = "api.extract_cabinets:handler"
