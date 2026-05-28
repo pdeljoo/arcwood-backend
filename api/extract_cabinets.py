@@ -14,14 +14,12 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from cabinet_extractor import extract_pdf, compute_material_takeoff
+    from .cabinet_extractor import extract_pdf, compute_material_takeoff
     _import_error = None
 except Exception as e:
     extract_pdf = None
     compute_material_takeoff = None
     _import_error = f"{type(e).__name__}: {e}"
-
-
 class handler(BaseHTTPRequestHandler):
 
     def _cors_headers(self):
