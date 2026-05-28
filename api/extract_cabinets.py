@@ -1,91 +1,116 @@
-
-Vercel Serverless Function: /api/extract-cabinets
-Receives PDF as base64, returns extracted cabinets + material takeoff.
 """
+Arcwood Millwork - Cabinet Extraction API
+Vercel Serverless Function (Python)
+"""
+
+from http.server import BaseHTTPRequestHandler
 import json
 import base64
-import io
-import sys
 import os
+import sys
+import tempfile
+import traceback
 
-# Add parent directory to path so we can import cabinet_extractor
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cabinet_extractor import extract_pdf, compute_material_takeoff
-import pdfplumber
-import tempfile
+try:
+    from cabinet_extractor import extract_pdf, compute_material_takeoff
+    _import_error = None
+except Exception as e:
+    extract_pdf = None
+    compute_material_takeoff = None
+    _import_error = f"{type(e).__name__}: {e}"
 
 
-def handler(request):
-    """Vercel handler — accepts POST with base64 PDF."""
+class handler(BaseHTTPRequestHandler):
 
-    # CORS headers
-    headers = {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-        'Content-Type': 'application/json',
-    }
+    def _cors_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
-    # Handle CORS preflight
-    if request.method == 'OPTIONS':
-        return {'statusCode': 200, 'headers': headers, 'body': ''}
+    def _send_json(self, status_code, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
 
-    if request.method != 'POST':
-        return {
-            'statusCode': 405,
-            'headers': headers,
-            'body': json.dumps({'error': 'Method not allowed'}),
-        }
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors_headers()
+        self.end_headers()
 
-    try:
-        body = json.loads(request.body) if isinstance(request.body, str) else request.body
+    def do_GET(self):
+        self._send_json(200, {
+            "status": "ok",
+            "service": "arcwood-cabinet-extractor",
+            "version": "1.0.0",
+            "module_loaded": extract_pdf is not None,
+            "import_error": _import_error,
+        })
 
-        # Get base64 PDF
-        pdf_b64 = body.get('pdf_base64')
-        if not pdf_b64:
-            return {
-                'statusCode': 400,
-                'headers': headers,
-                'body': json.dumps({'error': 'Missing pdf_base64'}),
-            }
-
-        # Get specific pages (optional)
-        pages = body.get('pages')  # list of 0-indexed page numbers
-        waste_pct = body.get('waste_pct', 0.25)
-
-        # Decode PDF
-        pdf_bytes = base64.b64decode(pdf_b64)
-
-        # Save to temp file (pdfplumber needs a file path)
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
-            tmp.write(pdf_bytes)
-            tmp_path = tmp.name
-
+    def do_POST(self):
+        tmp_path = None
         try:
-            # Extract
-            extraction = extract_pdf(tmp_path, pages)
-            takeoff = compute_material_takeoff(extraction, waste_pct)
+            if extract_pdf is None:
+                self._send_json(500, {
+                    "error": "cabinet_extractor module failed to import",
+                    "detail": _import_error,
+                })
+                return
 
-            return {
-                'statusCode': 200,
-                'headers': headers,
-                'body': json.dumps({
-                    'success': True,
-                    'extraction': extraction,
-                    'takeoff': takeoff,
-                }),
-            }
+            content_length = int(self.headers.get("Content-Length", 0) or 0)
+            if content_length <= 0:
+                self._send_json(400, {"error": "Empty request body"})
+                return
+
+            raw = self.rfile.read(content_length)
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError as e:
+                self._send_json(400, {"error": "Invalid JSON", "detail": str(e)})
+                return
+
+            pdf_b64 = payload.get("pdf_base64")
+            pages = payload.get("pages")
+            waste_pct = float(payload.get("waste_pct", 0.25))
+
+            if not pdf_b64:
+                self._send_json(400, {"error": "Missing 'pdf_base64' field"})
+                return
+
+            try:
+                pdf_bytes = base64.b64decode(pdf_b64)
+            except Exception as e:
+                self._send_json(400, {"error": "Invalid base64", "detail": str(e)})
+                return
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".pdf", dir="/tmp", delete=False
+            ) as tmp:
+                tmp.write(pdf_bytes)
+                tmp_path = tmp.name
+
+            extraction = extract_pdf(tmp_path, pages=pages)
+            takeoff = compute_material_takeoff(extraction, waste_pct=waste_pct)
+
+            self._send_json(200, {
+                "extraction": extraction,
+                "takeoff": takeoff,
+            })
+
+        except Exception as e:
+            self._send_json(500, {
+                "error": "Internal server error",
+                "detail": str(e),
+                "trace": traceback.format_exc(),
+            })
         finally:
-            os.unlink(tmp_path)
-
-    except Exception as e:
-        import traceback
-        return {
-            'statusCode': 500,
-            'headers': headers,
-            'body': json.dumps({
-                'error': str(e),
-                'trace': traceback.format_exc(),
-            }),
-        }
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
